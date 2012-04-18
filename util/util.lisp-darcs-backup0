@@ -1,0 +1,539 @@
+
+(defpackage :util
+  (:use :cl :clos)
+  (:export :print-code
+           :mklist
+           :fint
+           :compose
+           :mappend
+           :mac-debug
+           :mkstr
+           :symb
+           :with-gensyms
+           :last1
+           :while
+           :aif
+           :aif2
+           :it
+           :group
+           :symbol-upcase
+           :lrec
+	   :full-lrec
+           :trec
+	   :full-tree-traversal
+           :_f
+           :mapa-b
+           :fn
+           :for
+           :for-step
+           :acond
+           :acond2
+           :asdf-load
+           :memoize
+           :dbg
+           :start-debug
+           :stop-debug
+           :dbg-indent
+           :=defun
+           :=values
+           :=bind
+           :pull
+           :single
+           :double
+           :triple
+           :quadruple
+           :awhen
+           :instance-of-p
+           :flatten
+	   :find-all-if
+	   :random-elt
+           :longer
+	   :defclosuref
+	   :defclosure
+	   :defclosureclass
+	   :map3
+	   :map3car
+	   :car-list
+	   :peek
+	   :defpair
+	   :deftriple
+	   :spy))
+
+(in-package :util)
+(shadow :with-gensyms :cl-user)
+
+(defvar *sub-print* 0)
+(defvar *line-count* 0)
+
+(defvar *debug-io* *standard-output*)
+
+(defun last1 (lst)
+  (car (last lst)))
+
+(defun print-code-result (body result output)
+    (format t "~%[~a~a]> ~S" (if (zerop *sub-print*) "" (format nil "~a." *sub-print*)) (incf *line-count*) body)
+    (princ output)
+    (mapcar #'(lambda (value) 
+                (format t "~%~S; " value)) (butlast result))
+    (format t "~%~S" (last1 result)))
+
+;;new implementation
+;;captures body output and prints after the form, but before the return
+(defmacro print-code (&body forms)
+  (let ((gbody (gensym))
+        (gresult (gensym))
+        (gstring (gensym)))
+    `(progn
+       ,@(mapcar (lambda (body) 
+                   `(let* ((,gbody ',(copy-tree body))
+                           (,gstring (make-array 0 :element-type 'character :fill-pointer 0 :adjustable t))
+                           (,gresult (let ((*line-count* 0)
+                                           (*sub-print* (1+ *sub-print*)))
+                                       (multiple-value-list (with-output-to-string (*standard-output* ,gstring) ,body)))))
+                      (print-code-result ,gbody ,gresult ,gstring)
+                      nil)) forms ))))
+
+#| old implementation - does not capture body output.
+(defmacro print-code (&body forms)
+  `(progn
+     ,@(mapcar (lambda (body) 
+                 `(print-code-result ',(copy-tree body) (multiple-value-list ,body))) forms)))|#
+
+
+;;makes obj into a list 
+(defun mklist (obj)
+  (if (listp obj) obj (list obj)))
+
+(defun fint (fn &rest fns)
+  (if (null fns)
+    fn
+    (let ((chain (apply #'fint fns)))
+      #'(lambda (x)
+          (and (funcall fn x) (funcall chain x))))))
+
+(defun compose (&rest fns)
+  (if fns
+    (let ((fn1 (car (last fns)))
+          (fns (butlast fns)))
+      #'(lambda (&rest args)
+          (reduce #'funcall fns
+                  :from-end t
+                  :initial-value (apply fn1 args))))
+    #'identity))
+
+;;
+(defun mappend (fn &rest lsts)
+  (apply #'append (apply #'mapcar fn lsts)))
+
+(defmacro mac-debug (expr)
+  `(format t "~%~S -> ~S -> ~S" ',expr (macroexpand-1 ',expr)
+           (multiple-value-bind (value error) (ignore-errors ,expr)
+             (if error
+               (format nil "Error: ~a" error) 
+               value))))
+
+(defun mkstr (&rest args)
+  (with-output-to-string (s)
+    (dolist (a args) (princ a s))))
+
+(defun symb (&rest args)
+  (values (intern (apply #'mkstr args))))
+
+(defun keyw (&rest args)
+  (values (intern (apply #'mkstr args) :keyword)))
+
+
+(defmacro while (test &body body)
+  `(do ()
+     ((not ,test))
+     ,@body))
+
+(defmacro aif (test-form then-form &optional else-form)
+  `(let ((it ,test-form))
+     (if it ,then-form ,else-form)))
+
+(defmacro aif2 (test &optional then else)
+  (let ((win (gensym)))
+    `(multiple-value-bind (it ,win) ,test
+       (if (or it ,win) ,then ,else))))
+
+(defun group (source n)
+  (if (zerop n) (error "zero length"))
+  (labels ((rec (source acc)
+                (let ((rest (nthcdr n source)))
+                  (if (consp rest)
+                    (rec rest (cons (subseq source 0 n) acc))
+                    (nreverse (cons source acc))))))
+    (if source (rec source nil) nil)))
+
+(defun symbol-upcase (symbol)
+  (if (keywordp symbol)
+    (keyw (string-upcase (symbol-name symbol)))
+    (symb (string-upcase (symbol-name symbol)))))
+
+(defun lrec (rec &optional base)
+  (labels ((self (lst)
+                 (if (null lst)
+                   (if (functionp base)
+                     (funcall base)
+                     base)
+                   (funcall rec (car lst)
+                            #'(lambda ()
+                                (self (cdr lst)))))))
+    #'self))
+
+(defun full-lrec (rec &optional base)
+  (lrec #'(lambda (car cdr)
+	    (funcall rec car)
+	    (funcall cdr))
+	base))
+
+(defun trec (rec &optional (base #'identity))
+  (labels
+      ((self (tree)
+	 (if (atom tree)
+	     (if (functionp base)
+		 (funcall base tree)
+		 base)
+	     (funcall rec tree
+		      #'(lambda ()
+			  (self (car tree)))
+		      #'(lambda ()
+			  (if (cdr tree)
+			      (self (cdr tree))))))))
+    #'self))
+
+(defun full-tree-traversal (x a b)
+  (declare (ignore x))
+  (funcall a)
+  (funcall b))
+
+
+(defmacro _f (op place &rest args)
+  (multiple-value-bind (vars forms var set access)
+    (get-setf-expansion place)
+    `(let (,@(mapcar #'list vars forms)
+            (,(car var) (,op ,access ,@args)))
+       ,set)))
+
+
+(defun mapa-b (fn a b &optional (step 1))
+  ;(format t "mapa-b ~a ~a ~a ~a" fn a b step)
+  (do ((i a (+ i step))
+       (result nil))
+    ((> i b) (nreverse result))
+    ;(format t "~%i:~a result:~a" i result)
+    (push (funcall fn i) result)))
+
+
+(defmacro fn (expr) 
+  `#',(rbuild expr))
+
+(defun rbuild (expr)
+  (if (or (atom expr) (eq (car expr) 'lambda))
+    expr
+    (if (eq (car expr) 'compose)
+      (build-compose (cdr expr))
+      (build-call (car expr) (cdr expr)))))
+
+(defun build-call (op fns)
+  (let ((g (gensym)))
+    `(lambda (,g)
+       (,op ,@(mapcar #'(lambda (f)
+                          `(,(rbuild f) ,g))
+                      fns)))))
+
+(defun build-compose (fns)
+  (let ((g (gensym)))
+    `(lambda (,g)
+       ,(labels ((rec (fns)
+                      (if fns
+                        `(,(rbuild (car fns))
+                           ,(rec (cdr fns)))
+                        g)))
+          (rec fns)))))
+
+
+(defmacro for ((var start stop) &body body)
+  (let ((gstop (gensym)))
+    `(do ((,var ,start (1+ ,var))
+          (,gstop ,stop))
+       ((> ,var ,gstop))
+       ,@body)))
+
+(defmacro acond (&rest clauses)
+  (if (null clauses)
+    nil
+    (let ((cl1 (car clauses))
+          (sym (gensym)))
+      `(let ((,sym ,(car cl1)))
+         (if ,sym
+           (let ((it ,sym))
+	     (declare (ignorable it))
+	     ,@(cdr cl1))
+           (acond ,@(cdr clauses)))))))
+
+
+(defmacro acond2 (&rest clauses)
+  (if (null clauses)
+    nil
+    (let ((cl1 (car clauses))
+          (val (gensym))
+          (win (gensym)))
+      `(multiple-value-bind (,val ,win) ,(car cl1)
+         (if (or ,val ,win)
+           (let ((it ,val))
+	     (declare (ignorable it))
+	     ,@(cdr cl1))
+           (acond2 ,@(cdr clauses)))))))
+
+(defmacro asdf-load (package)
+  `(asdf:operate 'asdf:load-op ',package))
+
+
+(defun memoize (fn)
+  (let ((cache (make-hash-table :test #'equal)))
+    #'(lambda (&rest args)
+        (multiple-value-bind (val win) (gethash args cache)
+          (if win
+            (progn
+              ;(format t "~%retrieving: ~S" val)
+            val)
+            (progn
+              ;(format t "~%caching: ~S"  args)
+              (setf (gethash args cache) (apply fn args))))))))
+
+
+
+(defvar *dbg-ids* nil "Identifiers used by dbg")
+
+(defun dbg (id format-string &rest args)
+  "Print debugging info if (DEBUG ID) has been specified."
+  (when (member id *dbg-ids*)
+    (fresh-line *debug-io*)
+    (apply #'format *debug-io* format-string args)))
+
+(defun start-debug (&rest ids)
+  "Start dbg output on the given ids."
+  (setf *dbg-ids* (union ids *dbg-ids*)))
+
+(defun stop-debug (&rest ids)
+  "Stop dbg on the ids. With no ids, stop dbg altogether."
+  (setf *dbg-ids* (if (null ids) nil
+                    (set-difference *dbg-ids* ids))))
+
+(defun dbg-indent (id indent format-string &rest args)
+       "Print indented debugging info if (DEBUG ID) has been specified."
+       (when (member id *dbg-ids*)
+         (fresh-line *debug-io*)
+         (dotimes (i indent) (princ "  " *debug-io*))
+         (apply #'format *debug-io* format-string args)))
+
+
+
+(defun all-identity (&rest args)
+  (values-list args))
+
+(defvar *cont* #'all-identity)
+
+(defmacro =lambda (parms &body body)
+  `#'(lambda (*cont* ,@parms) ,@body))
+
+(defmacro =defun (name parms &body body)
+  (let ((f (intern (concatenate 'string
+                                "=" (symbol-name name)))))
+    `(progn
+       (defmacro ,name ,parms
+         `(, ',f *cont* ,,@parms))
+       (defun ,f (*cont* ,@parms) ,@body))))
+
+(defmacro =bind (parms expr &body body)
+  `(let ((*cont* #'(lambda ,parms ,@body))) ,expr))
+
+(defmacro =values (&rest retvals)
+  `(funcall (print *cont* ) ,@retvals))
+
+(defmacro =funcall (fn &rest args)
+  `(funcall ,fn *cont* ,@args))
+
+(defmacro =apply (fn &rest args)
+  `(apply ,fn *cont* ,@args))
+
+
+(defmacro pull (obj place &rest args)
+  (multiple-value-bind (vars forms var set access)
+    (ext:get-setf-method place)
+    (let ((g (gensym)))
+          `(let* ((,g ,obj)
+                  ,@(mapcar #'list vars forms)
+                  (,(car var) (delete ,g ,access ,@args)))
+             ,set))))
+
+(defun longer (x y)
+  (labels ((compare (x y)
+                    (and (consp x)
+                         (or (null y)
+                             (compare (cdr x) (cdr y))))))
+    (if (and (listp x) (listp y))
+      (compare x y)
+      (> (length x) (length y)))))
+
+(defun single (lst)
+  (and (consp lst) (not (cdr lst))))
+
+(defun double (lst)
+  (and (consp lst) (single (cdr lst))))
+
+(defun triple (lst)
+  (and (consp lst) (double (cdr lst))))
+
+(defun quadruple (lst)
+  (and (consp lst) (triple (cdr lst))))
+
+(defmacro awhen (test-form &body body)
+  `(aif ,test-form
+        (progn ,@body)))
+
+(defun instance-of-p (obj class) 
+  (member class (class-precedence-list (class-of obj))))
+
+(defun flatten (x)
+  (labels ((rec (x acc)
+	     (cond ((null x) acc)
+		   ((atom x) (cons x acc))
+		   (t (rec (car x) (rec (cdr x) acc))))))
+    (rec x nil)))
+
+
+(defun find-all-if (test list)
+  (remove-if-not test list))
+
+
+(defun random-elt (choices)
+  "Choose an element from a list at random."
+  (elt choices (random (length choices))))
+
+;(defmacro with-gensyms (syms &body body)
+;  `(let ,(mapcar #'(lambda (s)
+;                     `(,s (gensym)))
+;                 syms)
+;     ,@body))
+
+(defmacro with-gensyms (syms &body body)
+  `(let ,(mapcar #'(lambda (s)
+                     `(,s (gensym (symbol-name ',s))))
+                 syms)
+     ,@body))
+
+(defun car-list (lst)
+  (mapcar #'(lambda (pair)
+              (car (mklist pair))) lst))
+
+(defmacro defclosuref (name (&rest lets) (&rest args) &body body)
+  `(let ,lets
+     (defun ,name ,args ,@body)
+     ,@(mapcar #'(lambda (var) 
+		   `(defun ,(symb name '- var) 
+			(&optional (value nil value-p))
+		      (if value-p
+			  (setf ,var value)
+			  ,var))) (car-list lets))
+     ',name))
+
+(defmacro defclosure (name (&rest lets) (&rest args) &body body)
+  `(let ,lets
+     (setf (symbol-function ,name) #'(lambda ,args ,@body))
+     ,@(mapcar #'(lambda (var) 
+		   `(setf (symbol-function (symb ,name '- ',var))
+			  #'(lambda (&optional (value nil value-p))
+		      (if value-p
+			  (setf ,var value)
+			  ,var)))) (car-list lets))
+     ,name))
+
+(defmacro defclosureclass (name 
+			   (&rest lets) 
+			   (&rest make-args) 
+			   (&rest fn-args) 
+			   &body body)
+  `(defun ,(symb 'make- name) (closure-name ,@make-args)
+     (defclosure closure-name ,lets ,fn-args
+		 ,@body)))
+
+(defun map3 (fn lst)
+  (labels ((rec (curr prev next left)
+	     (funcall fn curr prev next)
+	     (when left
+	       (rec (car left)
+		    curr
+		    (cadr left)
+		    (cdr left)))))
+    (when lst
+      (rec (car lst) nil (cadr lst) (cdr lst)))))
+
+
+(defun map3car (fn lst)
+  (labels ((rec (curr prev next left acc)
+	     (let ((result (funcall fn curr prev next)))
+	     (if left
+	       (rec (car left)
+		    curr
+		    (cadr left)
+		    (cdr left)
+		    (cons result acc))
+	       (cons result acc)))))
+    (when lst
+      (reverse (rec (car lst) nil (cadr lst) (cdr lst) nil)))))
+
+(defmacro peek (&rest args)
+  `(progn
+     (fresh-line)
+     ,(if (stringp (first args))
+	  `(apply #'format t (list ,@args))
+	  `(mapc #'(lambda (name value)
+		     (princ name)
+		     (princ ": ")
+		     (princ value)
+		     (princ " "))
+		 ',args
+		 (list ,@args)))))
+
+(defun setf-rplaca (cons obj)
+  (rplaca cons obj)
+  obj)
+
+(defun setf-rplacd (cons obj)
+  (rplacd cons obj)
+  obj)
+
+(defmacro defpair (name car cdr)
+  `(progn
+     (defun ,name (,car ,cdr)
+       (cons ,car ,cdr))
+     (defun ,(symb name '- car) (,name)
+       (car ,name))
+     (defun ,(symb name '- cdr) (,name)
+       (cdr ,name))
+     (defsetf ,(symb name '- car) setf-rplaca)
+     (defsetf ,(symb name '- cdr) setf-rplacd)
+     ',name))	       
+
+(defmacro deftriple (name first second third)
+  `(progn
+     (defun ,name (,first ,second ,third)
+       (list ,first ,second ,third))
+     (defun ,(symb name '- first) (,name)
+       (first ,name))
+     (defun ,(symb name '- second) (,name)
+       (second ,name))
+     (defun ,(symb name '- third) (,name)
+       (third ,name))
+     ',name))	       
+
+		 
+
+(defmacro spy (form)
+  `(let ((result (multiple-value-list ,form)))
+     (format t "~%~s => ~{~s ~}" ',form result)
+     (values-list result)))
+

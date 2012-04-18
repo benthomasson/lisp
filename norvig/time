@@ -1,0 +1,9 @@
+
+(defun f (n) (dotimes (i n) nil))
+
+(time (f 100000))
+
+(compile 'f)
+
+(time (f 100000))
+
