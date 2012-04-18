@@ -1,0 +1,8 @@
+
+Lisp Notes
+ben.thomasson@gmail.com
+
+ansi-common-lisp    - hand typed examples from Paul Graham's book: ANSI Common Lisp
+util                - Lisp utilities
+unit-test           - A unit-testing package
+
